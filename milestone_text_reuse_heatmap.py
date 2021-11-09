@@ -55,7 +55,9 @@ def load_metadata(meta_fp="OpenITI_metadata_2021-1-4_merged.txt"):
     with open(meta_fp, mode="r", encoding="utf-8") as file:
         reader = csv.DictReader(file, delimiter="\t")
         meta = {row["id"]: {"status": row["status"],\
-                            "date": int(row["date"])} for row in reader}
+                            "date": int(row["date"]),\
+                            "author": row["author_lat"],\
+                            "book": row["book"]} for row in reader}
     return meta
             
 
@@ -155,7 +157,9 @@ def create_plot_lines(ms_count_dicts, outfps):
 
 
 def plot_with_bokeh(date_ranges, split_data_lines, max_val, last_ms,
-                    cmap, outfp=None):
+                    cmap, outfp=None, filter_date_ranges=[], mode="inline"):
+    print("filter_date_ranges:", filter_date_ranges)
+    print("date_ranges:", date_ranges)
     # create subplots:
     tools = "pan,wheel_zoom,box_zoom,reset,tap"
     title_fmt = "Reuse of texts by authors who died between {} and {} AH"
@@ -165,6 +169,11 @@ def plot_with_bokeh(date_ranges, split_data_lines, max_val, last_ms,
         ax.background_fill_color="grey"
         ax.background_fill_alpha=0.3
         title=title_fmt.format(*dr)
+        filtered = [date_ranges[j] for j in filter_date_ranges if i > j]
+        print("FILTERED:", filtered)
+        if filtered:
+            filtered = ", ".join(["{}-{} AH".format(*dr) for dr in filtered])
+            title += " (text reuse from previous date range(s) filtered out: {})".format(filtered)
         ax.add_layout(Title(text=title, text_font_size="12pt"), "above")
         axes.append(ax)
 
@@ -245,8 +254,9 @@ def plot_with_bokeh(date_ranges, split_data_lines, max_val, last_ms,
 ##    columns = [[div]] + columns
     c = grid(columns)
     if outfp:
-        #output_file(title+".html")
-        save(c, outfp)
+        output_file(outfp, mode=mode)
+        save(c)
+        #save(c, outfp)
     #show(column(Div(text=title), *axes, sizing_mode="stretch_both"))
     show(c)
     
@@ -254,7 +264,7 @@ def plot_with_bokeh(date_ranges, split_data_lines, max_val, last_ms,
     
 
 def plot_with_matplotlib(date_ranges, split_data_lines, max_val, last_ms,
-                         cmap, outfp=None):
+                         cmap, outfp=None, filter_date_ranges=[]):
     """Use matplotlib to create the """
     # create the different subplots (axes);
     fig, axes = plt.subplots(len(date_ranges), 1)
@@ -309,7 +319,7 @@ def plot_with_matplotlib(date_ranges, split_data_lines, max_val, last_ms,
         plt.savefig(outfp)
     plt.show()
 
-def ms_data_heatmap(folder, date_ranges=[(0, 1501),],
+def ms_data_heatmap(folder, date_ranges=[(0, 1501),], filter_date_ranges=[],
                     cmap=plt.cm.autumn_r, plot_func=plot_with_matplotlib,
                     outfp=None):
     """Visualize the frequency of reuse of each token in a text
@@ -323,6 +333,10 @@ def ms_data_heatmap(folder, date_ranges=[(0, 1501),],
             visualized in a separate graph.
             NB: start date is inclusive, end date exclusive:
             with [(0, 300), (300, 1501)] 300 will be included in the second graph.
+        filter_date_ranges (list): list of index numbers of the date_ranges list
+            for which the reuse data should be
+            filtered out from the later graphs (mostly used for displaying
+            only text reuse that the text itself did not reuse from other sources)
         cmap (Matplotlib color map): Matplot lib color map to be used
             for the heatmap: see
             https://matplotlib.org/stable/tutorials/colors/colormaps.html
@@ -365,7 +379,44 @@ def ms_data_heatmap(folder, date_ranges=[(0, 1501),],
     print("max_val:", max_val)
     print("last milestone:", last_ms)
 
-    plot_func(date_ranges, split_data_lines, max_val, last_ms, cmap, outfp)
+    # filter out lines from selected date ranges in other date ranges:
+    for i in filter_date_ranges:
+        # create a dictionary with for every milestone a list of reused token indexes
+        filter_data = dict()
+        for line_data in split_data_lines[i]:
+            ms = line_data[0][0]
+            if not ms in filter_data:
+                filter_data[ms] = []
+            for y in range(line_data[1][0], line_data[1][1]+1):
+                filter_data[ms].append(y)
+        # delete the reused token indexes from all following date ranges:
+        if i < len(split_data_lines):
+            for j in range(i+1, len(split_data_lines)):
+                filtered = []
+                for line_data in split_data_lines[j]:
+                    ms = line_data[0][0]
+                    freq = line_data[2]
+                    if ms not in filter_data:
+                        filtered.append(line_data)
+                    else:
+                        ys = [y for y in range(line_data[1][0], line_data[1][1]+1)]
+                        ys = [y for y in ys if y not in filter_data[ms]]
+                        if ys == []:
+                            continue
+                        else:
+                            start_index = ys[0]
+                            current_index = ys[0]
+                            for y in ys[1:]:
+                                if y == current_index + 1:
+                                    current_index = y
+                                else:
+                                    filtered.append([[ms, ms], [start_index, current_index], freq])
+                                    start_index = y
+                                    current_index = y
+                            filtered.append([[ms, ms], [start_index, current_index], freq])
+                split_data_lines[j] = filtered
+    plot_func(date_ranges, split_data_lines, max_val, last_ms, cmap, outfp,
+              filter_date_ranges=filter_date_ranges)
 
 def split_dates_to_date_ranges(split_dates, start_date=0, end_date=1501):
     """Given a list of dates, create date ranges
@@ -380,6 +431,8 @@ def split_dates_to_date_ranges(split_dates, start_date=0, end_date=1501):
     Returns:
         list (of tuples: (start_of_range (int), end_of_range (int)))
     """
+    if len(split_dates) == 1 and split_dates[0] in (0, 1450, 1500):
+        return [(0, 1500)]
     date_ranges = []
     for i, sd in enumerate(split_dates):
         if i == 0:
@@ -521,22 +574,49 @@ def download_srt_files(base_url, main_text_id, outfolder, incl_sec=False):
 
 meta = load_metadata()
 
+##folder = r"D:\London\publications\co-authored vol\geographers_srts_2019\0367IbnHawqal.SuratArd"
+##for fn in os.listdir(folder):
+##    if fn.endswith(".csv"):
+##        id2 = re.sub("-.+", "", fn.split("_")[1])
+##        if meta[id2]["date"] < 400:
+##            print(id2, meta[id2])
+##input("continue?")        
+##        
+
 
 base_url = "http://dev.kitab-project.org/passim01022021/"
 text_id = "Shamela0009788-ara1.mARkdown"
 folder = r"D:\London\publications\co-authored vol\geographers_srts_2019\0310Tabari.Tarikh"
 #download_srt_files(base_url, text_id, folder)
+folder = r"C:\Users\peter\Downloads\Dharica"
 #extract_milestone_data_from_folder(folder)
-split_dates = [310]
+split_dates = [1389]
+folder = r"D:\London\publications\co-authored vol\geographers_srts_2019\0367IbnHawqal.SuratArd"
+split_dates = [367, 500, 700, 900, 1100, 1300]
+split_dates = [0]
+
+folder = r"D:\London\publications\co-authored vol\geographers_srts_2019\0310Tabari.Tarikh"
+split_dates = [310, 500, 700, 900, 1100, 1300]
+#split_dates = [0]
+
+
 date_ranges = split_dates_to_date_ranges(split_dates)
 folder_name = os.path.split(folder)[-1]
 ms_data_heatmap(folder, date_ranges=date_ranges, cmap=inferno,
+#                outfp="output_images/{}_{}_filtered.html".format(folder_name, split_dates[0]),
+#                filter_date_ranges=[0],
                 outfp="output_images/{}_{}.html".format(folder_name, split_dates[0]),
+                filter_date_ranges=[],
                 plot_func=plot_with_bokeh)
 
-
+input("continue?")
 split_dates = [300, 500, 700, 900, 1100]
 date_ranges = split_dates_to_date_ranges(split_dates)
+ms_data_heatmap(os.path.join(parent, folder),
+                date_ranges=date_ranges, cmap=plt.cm.inferno_r,
+                #filter_date_ranges=[0],
+                outfp="output_images/{}_{}.png".format(folder, split_dates[0]))
+
 parent = r"D:\London\publications\co-authored vol\geographers_srts_2019"
 ##for folder in os.listdir(parent):
 ##    if os.path.isdir(os.path.join(parent, folder)):
